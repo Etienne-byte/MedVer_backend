@@ -1,0 +1,1004 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Fuel Monitoring System</title>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+        }
+
+        .card h2 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 1.4rem;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .fuel-gauge {
+            text-align: center;
+            padding: 20px 0;
+        }
+
+        .gauge-container {
+            position: relative;
+            width: 200px;
+            height: 200px;
+            margin: 0 auto 20px;
+        }
+
+        .gauge-background {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background: conic-gradient(
+                #ff4444 0% 15%,
+                #ffbb33 15% 30%,
+                #00C851 30% 100%
+            );
+            position: relative;
+            transition: background 0.5s ease;
+        }
+
+        .gauge-inner {
+            position: absolute;
+            top: 10%;
+            left: 10%;
+            width: 80%;
+            height: 80%;
+            background: white;
+            border-radius: 50%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.8rem;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .gauge-liters {
+            font-size: 2rem;
+            font-weight: bold;
+            line-height: 1;
+        }
+
+        .gauge-percentage {
+            font-size: 1rem;
+            color: #666;
+            margin-top: 5px;
+        }
+
+        .fuel-status {
+            margin-top: 10px;
+            font-size: 1.2rem;
+            font-weight: bold;
+            padding: 5px 15px;
+            border-radius: 20px;
+            display: inline-block;
+        }
+
+        .status-good {
+            background-color: #00C851;
+            color: white;
+        }
+
+        .status-warning {
+            background-color: #ffbb33;
+            color: black;
+        }
+
+        .status-critical {
+            background-color: #ff4444;
+            color: white;
+        }
+
+        .status-offline {
+            background-color: #6c757d;
+            color: white;
+        }
+
+        .data-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .data-item:last-child {
+            border-bottom: none;
+        }
+
+        .data-label {
+            font-weight: 600;
+            color: #555;
+        }
+
+        .data-value {
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .status-online {
+            color: #00C851;
+            font-weight: bold;
+        }
+
+        .status-offline-text {
+            color: #ff4444;
+            font-weight: bold;
+        }
+
+        .last-update {
+            text-align: center;
+            color: white;
+            margin-top: 20px;
+            font-style: italic;
+        }
+
+        .color-legend {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 0.9rem;
+        }
+
+        .legend-color {
+            width: 15px;
+            height: 15px;
+            border-radius: 3px;
+        }
+
+        .legend-red    { background-color: #ff4444; }
+        .legend-yellow { background-color: #ffbb33; }
+        .legend-green  { background-color: #00C851; }
+
+        .system-alert {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 20px;
+            text-align: center;
+            display: none;
+        }
+
+        .alert-theft {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+
+        .alert-empty {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+
+        .alert-critical {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+        }
+
+        .tank-info {
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 15px;
+        }
+
+        .tank-info h3 {
+            color: #0c5460;
+            margin-bottom: 10px;
+            font-size: 1.1rem;
+        }
+
+        .tank-data {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .distance-display {
+            text-align: center;
+            margin: 20px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+        }
+
+        .distance-value {
+            font-size: 2.2rem;
+            font-weight: bold;
+            color: #667eea;
+            margin: 10px 0;
+        }
+
+        .distance-label {
+            font-size: 1.1rem;
+            color: #555;
+        }
+
+        .distance-unit {
+            font-size: 1.2rem;
+            color: #333;
+        }
+
+        /* ---------------- Editable fuel efficiency ---------------- */
+        .fuel-rate-control {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .fuel-rate-control input {
+            width: 78px;
+            padding: 6px 8px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 0.95rem;
+            text-align: right;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .fuel-rate-control input:focus {
+            border-color: #667eea;
+            box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.15);
+        }
+
+        .fuel-rate-control .unit {
+            font-weight: bold;
+            color: #667eea;
+            font-size: 0.9rem;
+        }
+
+        .fuel-rate-control button {
+            padding: 6px 12px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 600;
+            transition: background 0.2s, transform 0.1s;
+        }
+
+        .fuel-rate-control button:hover  { background: #5568d3; }
+        .fuel-rate-control button:active { transform: scale(0.97); }
+        .fuel-rate-control button:disabled {
+            background: #b0b7c6;
+            cursor: not-allowed;
+        }
+
+        .fuel-rate-msg {
+            font-size: 0.82rem;
+            margin: 2px 0 6px;
+            min-height: 1em;
+            color: #666;
+            text-align: right;
+        }
+
+        .fuel-rate-msg.ok  { color: #00a844; font-weight: 600; }
+        .fuel-rate-msg.err { color: #c92a2a; font-weight: 600; }
+
+        /* ---------------- LED indicator strip ---------------- */
+        .led-strip {
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+            gap: 15px;
+            margin: 20px 0 5px;
+            padding: 18px 10px;
+            background: #1a1a1a;
+            border-radius: 12px;
+        }
+
+        .led-slot {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            flex: 1;
+        }
+
+        .led-bulb {
+            width: 46px;
+            height: 46px;
+            border-radius: 50%;
+            background: #333;
+            border: 3px solid #111;
+            transition: all 0.25s ease;
+            box-shadow: inset 0 0 8px rgba(0,0,0,0.8);
+        }
+
+        .led-bulb.on.red {
+            background: radial-gradient(circle at 35% 35%, #ff8888, #ff0000);
+            box-shadow: 0 0 20px 6px rgba(255,0,0,0.85);
+        }
+        .led-bulb.on.yellow {
+            background: radial-gradient(circle at 35% 35%, #ffe066, #ffbb00);
+            box-shadow: 0 0 20px 6px rgba(255,187,0,0.85);
+        }
+        .led-bulb.on.green {
+            background: radial-gradient(circle at 35% 35%, #7dffa9, #00c851);
+            box-shadow: 0 0 20px 6px rgba(0,200,81,0.85);
+        }
+
+        .led-label {
+            color: #ddd;
+            font-size: 0.8rem;
+            letter-spacing: 1px;
+            font-weight: 600;
+        }
+
+        /* ---------------- Buzzer indicator ---------------- */
+        .buzzer-box {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 14px 18px;
+            border-radius: 12px;
+            background: #f1f3f5;
+            margin-top: 15px;
+            border-left: 5px solid #adb5bd;
+            transition: all 0.3s ease;
+        }
+
+        .buzzer-box.active {
+            background: #ffe3e3;
+            border-left-color: #ff4444;
+            animation: buzzerPulse 0.8s ease-in-out infinite;
+        }
+
+        @keyframes buzzerPulse {
+            0%, 100% { transform: scale(1); }
+            50%      { transform: scale(1.02); }
+        }
+
+        .buzzer-icon { font-size: 1.8rem; line-height: 1; }
+
+        .buzzer-text { display: flex; flex-direction: column; }
+
+        .buzzer-title {
+            font-weight: 700;
+            color: #333;
+            font-size: 1rem;
+        }
+
+        .buzzer-state {
+            font-size: 0.88rem;
+            color: #666;
+            margin-top: 2px;
+        }
+
+        .buzzer-box.active .buzzer-state {
+            color: #c92a2a;
+            font-weight: 600;
+        }
+
+        @media (max-width: 768px) {
+            .dashboard       { grid-template-columns: 1fr; }
+            .header h1       { font-size: 2rem; }
+            .tank-data       { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>SMART VEHICLE FUEL LEVEL MONITORING AND DISTANCE PREDICTION SYSTEM</h1>
+            <p>Real-time fuel management with local audio &amp; visual alerts</p>
+        </div>
+
+        <!-- Alert Section -->
+        <div class="system-alert" id="systemAlert">
+            <strong id="alertTitle">Alert</strong>
+            <p id="alertMessage"></p>
+        </div>
+
+        <div class="dashboard">
+            <!-- Fuel Information Card -->
+            <div class="card">
+                <h2>⛽ Fuel Information</h2>
+                <div class="fuel-gauge">
+                    <div class="gauge-container">
+                        <div class="gauge-background" id="gaugeBackground"></div>
+                        <div class="gauge-inner">
+                            <div class="gauge-liters" id="fuelLitersDisplay">0.0L</div>
+                            <div class="gauge-percentage" id="fuelPercentageDisplay">0%</div>
+                        </div>
+                    </div>
+                    <div class="fuel-status" id="fuelStatus">UNKNOWN</div>
+
+                    <div class="color-legend">
+                        <div class="legend-item">
+                            <div class="legend-color legend-red"></div>
+                            <span>Critical (0-15%)</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color legend-yellow"></div>
+                            <span>Warning (16-30%)</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color legend-green"></div>
+                            <span>Good (31-100%)</span>
+                        </div>
+                    </div>
+
+                    <!-- Tank Information -->
+                    <div class="tank-info">
+                        <h3>Tank Details</h3>
+                        <div class="tank-data">
+                            <div class="data-item">
+                                <span class="data-label">Scaled Volume:</span>
+                                <span class="data-value" id="scaledLitres">0.0 L</span>
+                            </div>
+                            <div class="data-item">
+                                <span class="data-label">Fuel Height:</span>
+                                <span class="data-value" id="fuelHeight">0.0 cm</span>
+                            </div>
+                            <div class="data-item">
+                                <span class="data-label">Tank Capacity:</span>
+                                <span class="data-value">40.0 L</span>
+                            </div>
+                            <div class="data-item">
+                                <span class="data-label">Tank Height:</span>
+                                <span class="data-value">50.0 cm</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Distance Prediction Card -->
+            <div class="card">
+                <h2>📏 Distance Prediction</h2>
+                <div class="distance-display">
+                    <div class="distance-label">Remaining Distance</div>
+                    <div class="distance-value" id="remainingDistance">0.0</div>
+                    <div class="distance-unit">kilometers</div>
+                </div>
+
+                <!-- Editable fuel efficiency -->
+                <div class="data-item">
+                    <span class="data-label">Fuel Efficiency:</span>
+                    <span class="fuel-rate-control">
+                        <input type="number" id="fuelRateInput" step="0.1" min="0.5" max="50" value="10.0">
+                        <span class="unit">km/L</span>
+                        <button id="fuelRateSaveBtn">Save</button>
+                    </span>
+                </div>
+                <div id="fuelRateMsg" class="fuel-rate-msg"></div>
+
+                <div class="data-item">
+                    <span class="data-label">Fuel Available:</span>
+                    <span class="data-value" id="fuelAvailable">0.0 L</span>
+                </div>
+                <div class="data-item">
+                    <span class="data-label">Status:</span>
+                    <span class="data-value" id="distanceStatus">Calculating...</span>
+                </div>
+            </div>
+
+            <!-- Local Indicators Card (LEDs + Buzzer) -->
+            <div class="card">
+                <h2>🚨 Local Indicators</h2>
+
+                <div class="led-strip">
+                    <div class="led-slot">
+                        <div class="led-bulb red" id="ledRed"></div>
+                        <div class="led-label">RED</div>
+                    </div>
+                    <div class="led-slot">
+                        <div class="led-bulb yellow" id="ledYellow"></div>
+                        <div class="led-label">YELLOW</div>
+                    </div>
+                    <div class="led-slot">
+                        <div class="led-bulb green" id="ledGreen"></div>
+                        <div class="led-label">GREEN</div>
+                    </div>
+                </div>
+
+                <div class="buzzer-box" id="buzzerBox">
+                    <div class="buzzer-icon">🔔</div>
+                    <div class="buzzer-text">
+                        <span class="buzzer-title">Buzzer</span>
+                        <span class="buzzer-state" id="buzzerState">Silent</span>
+                    </div>
+                </div>
+
+                <div class="data-item" style="margin-top:10px;">
+                    <span class="data-label">Alert Level:</span>
+                    <span class="data-value" id="alertLevel">NORMAL</span>
+                </div>
+                <div class="data-item">
+                    <span class="data-label">Theft Detection:</span>
+                    <span class="data-value status-online" id="theftDetection">Armed</span>
+                </div>
+            </div>
+
+            <!-- System Status Card -->
+            <div class="card">
+                <h2>⚙️ System Status</h2>
+                <div class="data-item">
+                    <span class="data-label">Vehicle Status:</span>
+                    <span class="data-value" id="vehicleStatus">Offline</span>
+                </div>
+                <div class="data-item">
+                    <span class="data-label">Connection:</span>
+                    <span class="data-value" id="connectionStatus">Disconnected</span>
+                </div>
+                <div class="data-item">
+                    <span class="data-label">Uptime:</span>
+                    <span class="data-value" id="uptime">0s</span>
+                </div>
+                <div class="data-item">
+                    <span class="data-label">Database:</span>
+                    <span class="data-value" id="databaseStatus">Disconnected</span>
+                </div>
+                <div class="data-item">
+                    <span class="data-label">Last Sync:</span>
+                    <span class="data-value" id="lastUpdate">Never</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="last-update">
+            <p>Real-time data updates every 10 seconds | Scaled from 0.1 L test tube to 40 L real tank</p>
+        </div>
+    </div>
+
+    <script>
+        // ============================================================
+        // Firebase Configuration
+        // ============================================================
+        const firebaseConfig = {
+            apiKey: "AIzaSyCe9P-Gj6POg4OGJl0TB0KeYmBQbdqPdF8",
+            authDomain: "distance-prediction-system.firebaseapp.com",
+            databaseURL: "https://distance-prediction-system-default-rtdb.firebaseio.com/",
+            projectId: "distance-prediction-system",
+            storageBucket: "distance-prediction-system.appspot.com"
+        };
+
+        firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
+
+        // ============================================================
+        // DOM Elements
+        // ============================================================
+        const fuelLitersDisplay     = document.getElementById('fuelLitersDisplay');
+        const fuelPercentageDisplay = document.getElementById('fuelPercentageDisplay');
+        const scaledLitres          = document.getElementById('scaledLitres');
+        const fuelHeight            = document.getElementById('fuelHeight');
+        const fuelStatus            = document.getElementById('fuelStatus');
+        const gaugeBackground       = document.getElementById('gaugeBackground');
+
+        const remainingDistance     = document.getElementById('remainingDistance');
+        const fuelAvailable         = document.getElementById('fuelAvailable');
+        const distanceStatus        = document.getElementById('distanceStatus');
+
+        const fuelRateInput         = document.getElementById('fuelRateInput');
+        const fuelRateSaveBtn       = document.getElementById('fuelRateSaveBtn');
+        const fuelRateMsg           = document.getElementById('fuelRateMsg');
+
+        const ledRed                = document.getElementById('ledRed');
+        const ledYellow             = document.getElementById('ledYellow');
+        const ledGreen              = document.getElementById('ledGreen');
+        const buzzerBox             = document.getElementById('buzzerBox');
+        const buzzerState           = document.getElementById('buzzerState');
+        const alertLevel            = document.getElementById('alertLevel');
+        const theftDetection        = document.getElementById('theftDetection');
+
+        const vehicleStatus         = document.getElementById('vehicleStatus');
+        const connectionStatus      = document.getElementById('connectionStatus');
+        const uptime                = document.getElementById('uptime');
+        const databaseStatus        = document.getElementById('databaseStatus');
+        const lastUpdate            = document.getElementById('lastUpdate');
+
+        const systemAlert           = document.getElementById('systemAlert');
+        const alertTitle            = document.getElementById('alertTitle');
+        const alertMessage          = document.getElementById('alertMessage');
+
+        // ============================================================
+        // State tracking
+        // ============================================================
+        let previousFuelPercentage = 0;
+        let theftAlertCooldown     = false;
+        let lastTheftFlag          = false;
+        let currentAlertKind       = null;
+
+        // ============================================================
+        // Firebase Realtime Listener — vehicle telemetry
+        // ============================================================
+        const vehicleRef = database.ref('vehicle1');
+
+        vehicleRef.on('value', (snapshot) => {
+            const data = snapshot.val();
+            if (!data) return;
+
+            // ---------- Fuel values ----------
+            const fuelPercent  = parseFloat(data.fuel_percentage)    || 0;
+            const fuelLitres   = parseFloat(data.fuel_litres_scaled) || 0;
+            const fuelLevelCm  = parseFloat(data.fuel_level_cm)      || 0;
+            const remainingKm  = parseFloat(data.remaining_distance_km) || 0;
+
+            fuelLitersDisplay.textContent     = fuelLitres.toFixed(1) + 'L';
+            fuelPercentageDisplay.textContent = fuelPercent.toFixed(1) + '%';
+            scaledLitres.textContent          = fuelLitres.toFixed(2) + ' L';
+            fuelHeight.textContent            = fuelLevelCm.toFixed(1) + ' cm';
+
+            // ---------- Fuel gauge ----------
+            updateFuelStatus(fuelPercent, fuelLitres);
+
+            // ---------- Distance prediction ----------
+            updateDistancePrediction(fuelLitres, remainingKm);
+
+            // ---------- Cross-check applied fuel rate ----------
+            if (typeof data.fuel_rate_in_use !== 'undefined') {
+                const applied = parseFloat(data.fuel_rate_in_use);
+                if (!isNaN(applied) && document.activeElement !== fuelRateInput) {
+                    const shown = parseFloat(fuelRateInput.value);
+                    if (!isNaN(shown) && Math.abs(shown - applied) > 0.05) {
+                        fuelRateMsg.textContent = `Firmware is using ${applied.toFixed(1)} km/L`;
+                        fuelRateMsg.className = 'fuel-rate-msg';
+                    }
+                }
+            }
+
+            // ---------- LED indicator lamps ----------
+            setLedState(ledRed,    data.led_red    === true);
+            setLedState(ledYellow, data.led_yellow === true);
+            setLedState(ledGreen,  data.led_green  === true);
+
+            // ---------- Buzzer status ----------
+            updateBuzzer(!!data.buzzer_active, fuelPercent);
+
+            // ---------- Alert level ----------
+            const lvl = (data.alert_level || 'NORMAL').toUpperCase();
+            alertLevel.textContent = lvl;
+            alertLevel.className   = 'data-value ' + alertLevelClass(lvl);
+
+            // ---------- Theft detection ----------
+            const theft = data.theft_alert === true;
+            if (theft) {
+                theftDetection.textContent = 'DETECTED';
+                theftDetection.className   = 'data-value status-offline-text';
+                if (!lastTheftFlag) {
+                    showAlert('Fuel Theft Alert!',
+                        `Sudden fuel drop detected on the vehicle. Current fuel: ${fuelLitres.toFixed(2)} L (${fuelPercent.toFixed(1)}%).`,
+                        'alert-theft');
+                }
+            } else {
+                theftDetection.textContent = 'Armed';
+                theftDetection.className   = 'data-value status-online';
+            }
+            lastTheftFlag = theft;
+
+            // ---------- Client-side sanity check ----------
+            if (previousFuelPercentage > 0 &&
+                (previousFuelPercentage - fuelPercent) > 20 &&
+                !theftAlertCooldown) {
+                showAlert('Possible Fuel Drop',
+                    `Fuel dropped from ${previousFuelPercentage.toFixed(1)}% to ${fuelPercent.toFixed(1)}%.`,
+                    'alert-critical');
+                theftAlertCooldown = true;
+                setTimeout(() => theftAlertCooldown = false, 30000);
+            }
+            previousFuelPercentage = fuelPercent;
+
+            // ---------- System status ----------
+            const status = (data.status || 'offline').toLowerCase();
+            vehicleStatus.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+            vehicleStatus.className   = (status === 'online')
+                ? 'data-value status-online'
+                : 'data-value status-offline-text';
+
+            connectionStatus.textContent = 'Connected';
+            connectionStatus.className   = 'data-value status-online';
+            databaseStatus.textContent   = 'Connected';
+            databaseStatus.className     = 'data-value status-online';
+
+            // ---------- Uptime ----------
+            const uptimeSec = parseFloat(data.uptime_s) || 0;
+            uptime.textContent = formatUptime(Math.round(uptimeSec));
+
+            // ---------- Last sync ----------
+            lastUpdate.textContent = new Date().toLocaleTimeString();
+
+            // ---------- Global alert banner ----------
+            if (!theft) {
+                if (lvl === 'EMPTY') {
+                    showPersistentAlert('FUEL EMPTY',
+                        `The vehicle tank is empty (${fuelLitres.toFixed(2)} L). Buzzer is sounding continuously.`,
+                        'alert-empty', 'EMPTY');
+                } else if (lvl === 'CRITICAL') {
+                    showPersistentAlert('LOW FUEL WARNING',
+                        `Fuel level is critical (${fuelLitres.toFixed(2)} L / ${fuelPercent.toFixed(1)}%). Buzzer is beeping.`,
+                        'alert-critical', 'CRITICAL');
+                } else {
+                    hideAlert('NORMAL');
+                }
+            }
+        });
+
+        // ============================================================
+        // User-configurable fuel consumption rate
+        // Path: /config/fuel_consumption_rate  (km/L)
+        // ============================================================
+        const FUEL_RATE_DEFAULT = 10.0;
+        const FUEL_RATE_MIN     = 0.5;
+        const FUEL_RATE_MAX     = 50.0;
+
+        const fuelRateRef = database.ref('config/fuel_consumption_rate');
+
+        fuelRateRef.on('value', (snapshot) => {
+            const v = snapshot.val();
+            if (v === null || isNaN(parseFloat(v))) {
+                if (document.activeElement !== fuelRateInput) {
+                    fuelRateInput.value = FUEL_RATE_DEFAULT.toFixed(1);
+                }
+            } else {
+                if (document.activeElement !== fuelRateInput) {
+                    fuelRateInput.value = parseFloat(v).toFixed(1);
+                }
+            }
+        });
+
+        fuelRateSaveBtn.addEventListener('click', () => {
+            const raw = fuelRateInput.value.trim();
+            const val = parseFloat(raw);
+
+            if (isNaN(val) || val < FUEL_RATE_MIN || val > FUEL_RATE_MAX) {
+                fuelRateMsg.textContent = `Enter a value between ${FUEL_RATE_MIN} and ${FUEL_RATE_MAX} km/L.`;
+                fuelRateMsg.className   = 'fuel-rate-msg err';
+                return;
+            }
+
+            fuelRateSaveBtn.disabled = true;
+            fuelRateMsg.textContent  = 'Saving...';
+            fuelRateMsg.className    = 'fuel-rate-msg';
+
+            fuelRateRef.set(val)
+                .then(() => {
+                    fuelRateMsg.textContent = `Saved: ${val.toFixed(1)} km/L`;
+                    fuelRateMsg.className   = 'fuel-rate-msg ok';
+                    setTimeout(() => {
+                        if (fuelRateMsg.textContent.startsWith('Saved')) {
+                            fuelRateMsg.textContent = '';
+                            fuelRateMsg.className   = 'fuel-rate-msg';
+                        }
+                    }, 2500);
+                })
+                .catch((err) => {
+                    fuelRateMsg.textContent = 'Save failed: ' + err.message;
+                    fuelRateMsg.className   = 'fuel-rate-msg err';
+                })
+                .finally(() => {
+                    fuelRateSaveBtn.disabled = false;
+                });
+        });
+
+        // ============================================================
+        // Fuel status badge
+        // ============================================================
+        function updateFuelStatus(percentage, litres) {
+            let text  = 'UNKNOWN';
+            let cls   = 'status-offline';
+            let gauge = 'conic-gradient(#ff4444 0% 15%, #ffbb33 15% 30%, #00C851 30% 100%)';
+
+            if (percentage <= 15) {
+                text  = 'CRITICAL';
+                cls   = 'status-critical';
+                gauge = 'conic-gradient(#ff4444 0% 100%)';
+            } else if (percentage <= 30) {
+                text  = 'WARNING';
+                cls   = 'status-warning';
+                gauge = 'conic-gradient(#ffbb33 0% 100%)';
+            } else {
+                text  = 'GOOD';
+                cls   = 'status-good';
+            }
+
+            fuelStatus.textContent = `${text} (${litres.toFixed(1)}L)`;
+            fuelStatus.className   = cls;
+            gaugeBackground.style.background = gauge;
+        }
+
+        // ============================================================
+        // Distance prediction
+        // ============================================================
+        function updateDistancePrediction(fuelLitres, remainingKm) {
+            remainingDistance.textContent = remainingKm.toFixed(1);
+            fuelAvailable.textContent     = fuelLitres.toFixed(1) + ' L';
+
+            if (fuelLitres <= 5) {
+                distanceStatus.textContent = 'Low Fuel';
+                distanceStatus.className   = 'data-value status-offline-text';
+            } else if (fuelLitres <= 10) {
+                distanceStatus.textContent = 'Moderate';
+                distanceStatus.className   = 'data-value status-warning';
+            } else {
+                distanceStatus.textContent = 'Good';
+                distanceStatus.className   = 'data-value status-online';
+            }
+        }
+
+        // ============================================================
+        // LED helper
+        // ============================================================
+        function setLedState(el, isOn) {
+            if (!el) return;
+            if (isOn) el.classList.add('on');
+            else      el.classList.remove('on');
+        }
+
+        // ============================================================
+        // Buzzer UI
+        // ============================================================
+        function updateBuzzer(isActive, pct) {
+            if (isActive) {
+                buzzerBox.classList.add('active');
+                if (pct <= 1) {
+                    buzzerState.textContent = 'CONTINUOUS — TANK EMPTY';
+                } else if (pct <= 15) {
+                    buzzerState.textContent = 'BEEPING — LOW FUEL';
+                } else {
+                    buzzerState.textContent = 'Sounding';
+                }
+            } else {
+                buzzerBox.classList.remove('active');
+                buzzerState.textContent = 'Silent';
+            }
+        }
+
+        // ============================================================
+        // Alert level text class
+        // ============================================================
+        function alertLevelClass(lvl) {
+            if (lvl === 'EMPTY' || lvl === 'CRITICAL') return 'status-offline-text';
+            if (lvl === 'WARNING')                     return 'status-warning';
+            return 'status-online';
+        }
+
+        // ============================================================
+        // Alerts
+        // ============================================================
+        function showAlert(title, message, cssClass) {
+            alertTitle.textContent   = title;
+            alertMessage.textContent = message;
+            systemAlert.className    = 'system-alert ' + (cssClass || '');
+            systemAlert.style.display = 'block';
+
+            setTimeout(() => {
+                systemAlert.style.display = 'none';
+                systemAlert.className    = 'system-alert';
+            }, 10000);
+        }
+
+        function showPersistentAlert(title, message, cssClass, kind) {
+            if (currentAlertKind === kind) return;
+            currentAlertKind = kind;
+
+            alertTitle.textContent    = title;
+            alertMessage.textContent  = message;
+            systemAlert.className     = 'system-alert ' + cssClass;
+            systemAlert.style.display = 'block';
+        }
+
+        function hideAlert(kind) {
+            if (currentAlertKind === kind) return;
+            currentAlertKind = kind;
+            systemAlert.style.display = 'none';
+            systemAlert.className     = 'system-alert';
+        }
+
+        // ============================================================
+        // Connection monitor
+        // ============================================================
+        database.ref('.info/connected').on('value', (snapshot) => {
+            if (snapshot.val() === true) {
+                connectionStatus.textContent = 'Connected';
+                connectionStatus.className   = 'data-value status-online';
+                databaseStatus.textContent   = 'Connected';
+                databaseStatus.className     = 'data-value status-online';
+            } else {
+                connectionStatus.textContent = 'Disconnected';
+                connectionStatus.className   = 'data-value status-offline-text';
+                databaseStatus.textContent   = 'Disconnected';
+                databaseStatus.className     = 'data-value status-offline-text';
+
+                showAlert('Connection Lost',
+                    'Lost connection to Firebase. Data shown may be outdated.',
+                    'alert-critical');
+            }
+        });
+
+        // ============================================================
+        // Uptime formatter
+        // ============================================================
+        function formatUptime(seconds) {
+            if (!isFinite(seconds) || seconds < 0) return '0s';
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+            if (h > 0) return `${h}h ${m}m ${s}s`;
+            if (m > 0) return `${m}m ${s}s`;
+            return `${s}s`;
+        }
+
+        // ============================================================
+        // Initial paint
+        // ============================================================
+        updateFuelStatus(0, 0);
+        updateDistancePrediction(0, 0);
+    </script>
+</body>
+</html>
