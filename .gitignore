@@ -1,0 +1,32 @@
+# ========================================================
+# MedVer_backend .gitignore
+# ========================================================
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Environment Secrets
+.env
+.env.*
+serviceAccountKey.json
+*.pem
+*.key
+
+# Local Data Store & Logs
+store.json
+*.log
+*.sqlite3
+
+# OS Files
+.DS_Store
+Thumbs.db
