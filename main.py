@@ -219,19 +219,33 @@ def submit_scan(barcode: str, similarity: int = DEFAULT_SIMILARITY,
     p = lookup_product(barcode)
     if p is None:
         code_match, product_name = "not_found", "Unknown product"
-    elif p.get("status") == "flagged":
+    elif str(p.get("status", "")).lower() in ("flagged", "invalid") or p.get("isValid") is False or p.get("is_valid") is False:
         code_match, product_name = "already_used", p.get("name", "Unknown product")
-    else:
+    elif str(p.get("status", "")).lower() == "valid" or p.get("isValid") is True or p.get("is_valid") is True:
         code_match, product_name = "valid_unused", p.get("name", "Unknown product")
+    else:
+        code_match, product_name = "status_unknown", p.get("name", "Unknown product")
 
     category = classify(code_match, similarity)
     now_ms = int(time.time() * 1000)
     scan_id = str(uuid.uuid4())[:8]
 
+    product_fields = p or {}
+    nested_product = product_fields.get("product") or product_fields.get("details") or product_fields.get("medicine")
+    if isinstance(nested_product, dict):
+        product_fields = {**product_fields, **nested_product}
+
     record = {
         "id": scan_id,
         "barcode": barcode,
         "productName": product_name,
+        "medicineType": product_fields.get("category", product_fields.get("medicineType", product_fields.get("type", ""))),
+        "manufacturer": product_fields.get("manufacturer", product_fields.get("manufacturerName", product_fields.get("brand", ""))),
+        "batch": product_fields.get("batch", product_fields.get("batchNumber", "")),
+        "expiry": product_fields.get("expiry", product_fields.get("expiryDate", product_fields.get("expirationDate", ""))),
+        "piecesPerPack": product_fields.get("piecesPerPack", product_fields.get("packSize", product_fields.get("quantity", 0))),
+        "registryStatus": "not_found" if p is None else product_fields.get("status", "unknown"),
+        "productDetails": p,
         "codeMatch": code_match,
         "similarity": similarity,
         "category": category,

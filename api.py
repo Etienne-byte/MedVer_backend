@@ -21,6 +21,15 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 # Ensure serial (or Mock LCD simulator) is initialized
 connect_serial(SERIAL_PORT, BAUD_RATE)
 
+@app.route("/", methods=["GET"])
+def api_root():
+    return jsonify({
+        "service": "MedVerify Backend Gateway",
+        "status": "online",
+        "health": "/api/health",
+        "endpoints": ["/api/scan", "/api/scan-image", "/api/scans", "/api/products", "/api/seed"]
+    })
+
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({
