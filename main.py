@@ -8,13 +8,16 @@ from datetime import datetime
 from dotenv import load_dotenv
 import requests
 
-# Load environment configuration from .env if present
-load_dotenv()
+# Load backend configuration independently of the shell's working directory.
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BACKEND_DIR, ".env"))
 
 # ============================== CONFIGURATION ==============================
-FIREBASE_URL  = os.getenv("FIREBASE_URL", "https://medverify-66b55-default-rtdb.firebaseio.com").rstrip("/")
-PROJECT_ID    = os.getenv("FIREBASE_PROJECT_ID", "medverify-66b55")
+FIREBASE_URL  = os.getenv("FIREBASE_URL", "https://distance-prediction-system-default-rtdb.firebaseio.com").rstrip("/")
+PROJECT_ID    = os.getenv("FIREBASE_PROJECT_ID", "distance-prediction-system")
 FIREBASE_CRED = os.getenv("FIREBASE_CRED", "serviceAccountKey.json")
+if not os.path.isabs(FIREBASE_CRED):
+    FIREBASE_CRED = os.path.join(BACKEND_DIR, FIREBASE_CRED)
 
 SERIAL_PORT   = os.getenv("SERIAL_PORT", "MOCK")   # 'MOCK', 'AUTO', or COM port e.g. 'COM6'
 BAUD_RATE     = int(os.getenv("BAUD_RATE", "9600"))
@@ -25,23 +28,55 @@ DEFAULT_LOCATION   = os.getenv("LOCATION", "Kigali")
 DEVICE_ID          = os.getenv("DEVICE_ID", "edge-scanner-01")
 DEFAULT_SIMILARITY = int(os.getenv("DEFAULT_SIMILARITY", "95"))
 
-DATA_FILE = os.path.join(os.path.dirname(__file__), "store.json")
+DATA_FILE = os.path.join(BACKEND_DIR, "store.json")
 
 # ============================== FIREBASE ADMIN (OPTIONAL) ===================
 fs_client = None
+firebase_error = None
+firebase_db = None
 if os.path.exists(FIREBASE_CRED):
     try:
         import firebase_admin
         from firebase_admin import credentials, firestore
+        from firebase_admin import db as admin_db
         if not firebase_admin._apps:
             cred = credentials.Certificate(FIREBASE_CRED)
             firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_URL})
         fs_client = firestore.client()
+        firebase_db = admin_db
         print("[Firebase] Admin SDK initialized successfully with serviceAccountKey.")
     except Exception as e:
+        firebase_error = str(e)
         print(f"[Firebase] Admin init note: {e}. Using REST & Local store.")
 else:
-    print("[Firebase] Running in direct REST / Local store mode (no serviceAccountKey.json required).")
+    firebase_error = "Service account credentials are not configured."
+    print("[Firebase] No service account found; RTDB REST access requires public database rules.")
+
+def firebase_status():
+    if firebase_db is not None:
+        try:
+            firebase_db.reference(".info/serverTimeOffset").get()
+            return {"connected": True, "mode": "admin", "authenticated": True, "error": None}
+        except Exception as exc:
+            return {"connected": False, "mode": "admin", "authenticated": True, "error": str(exc)}
+    try:
+        response = requests.get(f"{FIREBASE_URL}/.json", timeout=3)
+        if response.status_code == 401:
+            return {"connected": False, "mode": "rest", "authenticated": False, "error": "Firebase rejected unauthenticated access (HTTP 401). Configure service-account credentials or database rules."}
+        response.raise_for_status()
+        return {"connected": True, "mode": "rest", "authenticated": False, "error": None}
+    except requests.RequestException as exc:
+        return {"connected": False, "mode": "rest", "authenticated": False, "error": firebase_error or str(exc)}
+
+def firebase_rest_get(path):
+    response = requests.get(f"{FIREBASE_URL}/{path}.json", timeout=5)
+    response.raise_for_status()
+    return response.json()
+
+def firebase_rest_write(method, path, payload):
+    response = requests.request(method, f"{FIREBASE_URL}/{path}.json", json=payload, timeout=5)
+    response.raise_for_status()
+    return response.json()
 
 # ============================== LOCAL PERSISTENCE ===========================
 DEFAULT_PRODUCTS = {
@@ -200,16 +235,24 @@ def lookup_product(barcode: str):
         except Exception:
             pass
 
+    if firebase_db is not None:
+        try:
+            product = firebase_db.reference(f"products/{barcode}").get()
+            if product:
+                return product
+        except Exception as exc:
+            print(f"[Firebase] Product lookup failed: {exc}")
+
+    try:
+        product = firebase_rest_get(f"products/{barcode}")
+        if product:
+            return product
+    except requests.RequestException as exc:
+        print(f"[Firebase] Product REST lookup failed: {exc}")
+
     p = _db_store["products"].get(barcode)
     if p:
         return p
-
-    try:
-        res = requests.get(f"{FIREBASE_URL}/products/{barcode}.json", timeout=3)
-        if res.status_code == 200 and res.json():
-            return res.json()
-    except Exception:
-        pass
 
     return None
 
@@ -261,11 +304,17 @@ def submit_scan(barcode: str, similarity: int = DEFAULT_SIMILARITY,
         _db_store["scans"] = _db_store["scans"][:300]
     save_store(_db_store)
 
-    # 2. Push to Firebase RTDB REST
-    try:
-        requests.put(f"{FIREBASE_URL}/scans/{scan_id}.json", json=record, timeout=3)
-    except Exception:
-        pass
+    # 2. Push to Firebase RTDB
+    if firebase_db is not None:
+        try:
+            firebase_db.reference(f"scans/{scan_id}").set(record)
+        except Exception as exc:
+            print(f"[Firebase] Scan write failed: {exc}")
+    else:
+        try:
+            firebase_rest_write("PUT", f"scans/{scan_id}", record)
+        except requests.RequestException as exc:
+            print(f"[Firebase] Scan REST write failed: {exc}")
 
     # 3. Push to Firestore if Admin client is active
     if fs_client:
@@ -281,9 +330,38 @@ def submit_scan(barcode: str, similarity: int = DEFAULT_SIMILARITY,
     return record
 
 def get_all_scans():
+    if firebase_db is not None:
+        try:
+            records = firebase_db.reference("scans").get() or {}
+            values = records.values() if isinstance(records, dict) else []
+            return sorted(values, key=lambda item: int(item.get("createdAt", 0)), reverse=True)[:300]
+        except Exception as exc:
+            print(f"[Firebase] Scan read failed; using local cache: {exc}")
+    else:
+        try:
+            records = firebase_rest_get("scans") or {}
+            if isinstance(records, dict):
+                values = [item for item in records.values() if isinstance(item, dict)]
+                return sorted(values, key=lambda item: int(item.get("createdAt", 0)), reverse=True)[:300]
+        except requests.RequestException as exc:
+            print(f"[Firebase] Scan REST read failed; using local cache: {exc}")
     return _db_store["scans"]
 
 def get_all_products():
+    if firebase_db is not None:
+        try:
+            records = firebase_db.reference("products").get() or {}
+            if isinstance(records, dict):
+                return [{"id": pid, **pdata} for pid, pdata in records.items() if isinstance(pdata, dict)]
+        except Exception as exc:
+            print(f"[Firebase] Product read failed; using local cache: {exc}")
+    else:
+        try:
+            records = firebase_rest_get("products") or {}
+            if isinstance(records, dict):
+                return [{"id": pid, **pdata} for pid, pdata in records.items() if isinstance(pdata, dict)]
+        except requests.RequestException as exc:
+            print(f"[Firebase] Product REST read failed; using local cache: {exc}")
     res = []
     for pid, pdata in _db_store["products"].items():
         res.append({"id": pid, **pdata})
@@ -303,22 +381,41 @@ def add_product(prod_data: dict):
     }
     _db_store["products"][pid] = data
     save_store(_db_store)
-    try:
-        requests.put(f"{FIREBASE_URL}/products/{pid}.json", json=data, timeout=3)
-    except Exception:
-        pass
+    if firebase_db is not None:
+        try:
+            firebase_db.reference(f"products/{pid}").set(data)
+        except Exception as exc:
+            print(f"[Firebase] Product write failed: {exc}")
+    else:
+        try:
+            firebase_rest_write("PUT", f"products/{pid}", data)
+        except requests.RequestException as exc:
+            print(f"[Firebase] Product REST write failed: {exc}")
     return {"id": pid, **data}
 
 def toggle_product_status(pid: str):
-    p = _db_store["products"].get(pid)
+    p = None
+    if firebase_db is not None:
+        try:
+            p = firebase_db.reference(f"products/{pid}").get()
+        except Exception as exc:
+            print(f"[Firebase] Product status read failed: {exc}")
+    p = p or _db_store["products"].get(pid)
     if not p:
         return None
     p["status"] = "flagged" if p.get("status") == "valid" else "valid"
+    _db_store["products"][pid] = p
     save_store(_db_store)
-    try:
-        requests.put(f"{FIREBASE_URL}/products/{pid}.json", json=p, timeout=3)
-    except Exception:
-        pass
+    if firebase_db is not None:
+        try:
+            firebase_db.reference(f"products/{pid}").set(p)
+        except Exception as exc:
+            print(f"[Firebase] Product status write failed: {exc}")
+    else:
+        try:
+            firebase_rest_write("PUT", f"products/{pid}", p)
+        except requests.RequestException as exc:
+            print(f"[Firebase] Product status REST write failed: {exc}")
     return {"id": pid, **p}
 
 def update_scan_status(scan_id: str, new_status: str):
@@ -327,9 +424,12 @@ def update_scan_status(scan_id: str, new_status: str):
             s["caseStatus"] = new_status
             save_store(_db_store)
             try:
-                requests.patch(f"{FIREBASE_URL}/scans/{scan_id}.json", json={"caseStatus": new_status}, timeout=3)
-            except Exception:
-                pass
+                if firebase_db is not None:
+                    firebase_db.reference(f"scans/{scan_id}").update({"caseStatus": new_status})
+                else:
+                    firebase_rest_write("PATCH", f"scans/{scan_id}", {"caseStatus": new_status})
+            except Exception as exc:
+                print(f"[Firebase] Scan status update failed: {exc}")
             return s
     return None
 

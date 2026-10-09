@@ -10,6 +10,7 @@ from main import (
     update_scan_status,
     seed_demo,
     connect_serial,
+    firebase_status,
     SERIAL_PORT,
     BAUD_RATE
 )
@@ -35,7 +36,8 @@ def health():
     return jsonify({
         "status": "online",
         "service": "MedVerify Backend Gateway",
-        "serialPort": SERIAL_PORT
+        "serialPort": SERIAL_PORT,
+        "firebase": firebase_status()
     })
 
 @app.route("/api/scan", methods=["POST"])
