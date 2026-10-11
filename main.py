@@ -55,7 +55,9 @@ else:
 def firebase_status():
     if firebase_db is not None:
         try:
-            firebase_db.reference(".info/serverTimeOffset").get()
+            # The RTDB Admin SDK does not allow the reserved .info metadata path here.
+            # Reading the database root is a valid connectivity check for authenticated access.
+            firebase_db.reference("/").get()
             return {"connected": True, "mode": "admin", "authenticated": True, "error": None}
         except Exception as exc:
             return {"connected": False, "mode": "admin", "authenticated": True, "error": str(exc)}
@@ -379,18 +381,12 @@ def add_product(prod_data: dict):
         "expiry": prod_data.get("expiry", "2027-12-31"),
         "status": prod_data.get("status", "valid")
     }
+    if firebase_db is not None:
+        firebase_db.reference(f"products/{pid}").set(data)
+    else:
+        firebase_rest_write("PUT", f"products/{pid}", data)
     _db_store["products"][pid] = data
     save_store(_db_store)
-    if firebase_db is not None:
-        try:
-            firebase_db.reference(f"products/{pid}").set(data)
-        except Exception as exc:
-            print(f"[Firebase] Product write failed: {exc}")
-    else:
-        try:
-            firebase_rest_write("PUT", f"products/{pid}", data)
-        except requests.RequestException as exc:
-            print(f"[Firebase] Product REST write failed: {exc}")
     return {"id": pid, **data}
 
 def toggle_product_status(pid: str):
@@ -418,20 +414,29 @@ def toggle_product_status(pid: str):
             print(f"[Firebase] Product status REST write failed: {exc}")
     return {"id": pid, **p}
 
-def update_scan_status(scan_id: str, new_status: str):
-    for s in _db_store["scans"]:
-        if s["id"] == scan_id:
-            s["caseStatus"] = new_status
-            save_store(_db_store)
-            try:
-                if firebase_db is not None:
-                    firebase_db.reference(f"scans/{scan_id}").update({"caseStatus": new_status})
-                else:
-                    firebase_rest_write("PATCH", f"scans/{scan_id}", {"caseStatus": new_status})
-            except Exception as exc:
-                print(f"[Firebase] Scan status update failed: {exc}")
-            return s
-    return None
+def update_scan_status(scan_id: str, changes):
+    record = None
+    if firebase_db is not None:
+        record = firebase_db.reference(f"scans/{scan_id}").get()
+    else:
+        for cached in _db_store["scans"]:
+            if cached.get("id") == scan_id:
+                record = cached
+                break
+    if not record:
+        return None
+
+    record.update(changes)
+    for cached in _db_store["scans"]:
+        if cached.get("id") == scan_id:
+            cached.update(changes)
+            break
+    save_store(_db_store)
+    if firebase_db is not None:
+        firebase_db.reference(f"scans/{scan_id}").update(changes)
+    else:
+        firebase_rest_write("PATCH", f"scans/{scan_id}", changes)
+    return record
 
 def seed_demo():
     for pid, pdata in DEFAULT_PRODUCTS.items():

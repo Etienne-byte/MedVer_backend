@@ -13,6 +13,26 @@ Flask API gateway for the MedVerify dashboard, scanners, and ESP32.
 
 The service-account key is server-only and must remain outside source control. Do not make the database publicly readable/writable to bypass authentication. Without a valid service-account key, the backend reports RTDB authorization failures and falls back to its local `store.json` cache.
 
+## Rwanda FDA roles and accounts
+
+The dashboard uses Firebase Authentication email/password accounts. There is no public sign-up or client-side role selector. In Firebase Console > Authentication, enable Email/Password and create each staff account. Assign each account by email in the backend `.env`, then restart the API:
+
+```dotenv
+ROLE_FIELD_OFFICER_EMAILS=officer@example.gov.rw
+ROLE_ICT_STAFF_EMAILS=ict@example.gov.rw
+ROLE_MANAGER_EMAILS=manager@example.gov.rw
+```
+
+Multiple accounts for a role can be comma-separated. These lists are authoritative; the API verifies each Firebase ID token and rejects accounts not assigned a role.
+
+| Role | Access |
+| --- | --- |
+| `field_officer` | Dashboard, live barcode/QR scanning, review alerts, and update investigation case status. |
+| `ict_staff` | Dashboard read access and product registry management, including product status and demo-data maintenance. |
+| `manager` | Dashboard and scan reports, case status review, and case priority assignment (`low`, `normal`, `high`, `urgent`). |
+
+All protected API requests require a valid Firebase ID token. The backend role allowlists must be configured before users can enter the dashboard. Keep `.env` and the service-account key out of source control.
+
 ## Run
 
 Install dependencies with `python -m pip install -r requirements.txt`, then start the API using `python api.py`. The API listens on port 8000 unless `PORT` is set.
