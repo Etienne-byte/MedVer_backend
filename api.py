@@ -19,7 +19,7 @@ from main import (
 app = Flask(__name__)
 # Allowed origins for CORS security (Vercel production and local Vite development)
 DEFAULT_ALLOWED_ORIGINS = [
-    "https://med-verify-eta.vercel.app",
+    "https://medverify-259.pages.dev",
     "http://localhost:5173",
     "http://localhost:3000",
     "http://localhost:5174",
