@@ -17,8 +17,34 @@ from main import (
 )
 
 app = Flask(__name__)
-# Enable CORS for all routes so the Vite React frontend can communicate seamlessly
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+# Allowed origins for CORS security (Vercel production and local Vite development)
+DEFAULT_ALLOWED_ORIGINS = [
+    "https://med-verify-eta.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://localhost:5174",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+]
+
+env_origins = os.getenv("ALLOWED_ORIGINS")
+if env_origins:
+    custom_origins = [o.strip().rstrip("/") for o in env_origins.split(",") if o.strip()]
+    allowed_origins = list(dict.fromkeys(DEFAULT_ALLOWED_ORIGINS + custom_origins))
+else:
+    allowed_origins = DEFAULT_ALLOWED_ORIGINS
+
+CORS(
+    app,
+    resources={
+        r"/api/*": {
+            "origins": allowed_origins,
+            "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"]
+        }
+    },
+    supports_credentials=True
+)
 
 # Ensure serial (or Mock LCD simulator) is initialized
 connect_serial(SERIAL_PORT, BAUD_RATE)
