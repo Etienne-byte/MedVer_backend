@@ -576,4 +576,4 @@ if __name__ == "__main__":
         print(f" [*] Webcam scanner is in the Web App at http://localhost:5173")
         print(f" [*] Simulated ESP32/LCD is active in this console")
         print(f"============================================================\n")
-        app.run(host="0.0.0.0", port=port, debug=False)
+        app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
