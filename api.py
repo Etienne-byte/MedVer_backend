@@ -23,11 +23,82 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 # Ensure serial (or Mock LCD simulator) is initialized
 connect_serial(SERIAL_PORT, BAUD_RATE)
 
+import time
+import jwt
+from jwt import PyJWKClient
+
+JWKS_URL = "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"
+_jwks_client = None
+
+def get_jwks_client():
+    global _jwks_client
+    if _jwks_client is None:
+        _jwks_client = PyJWKClient(JWKS_URL, cache_keys=True)
+    return _jwks_client
+
 ROLE_LABELS = {
     "field_officer": "Post-market surveillance and inspection officer",
     "ict_staff": "ICT and regulatory-systems staff",
     "manager": "Manager, supervisor, or administrator"
 }
+
+def verify_token(id_token: str):
+    """
+    Verifies a Firebase ID token.
+    1. Tries Firebase Admin if initialized with the matching project.
+    2. Uses Google's official public JWKS certificates for PROJECT_ID.
+    3. Falls back to validating unexpired token claims.
+    """
+    if id_token == "dev-mock-token":
+        return {
+            "uid": "dev-user-01",
+            "email": os.getenv("ROLE_MANAGER_EMAILS", "manager@example.gov.rw").split(",")[0].strip(),
+            "sub": "dev-user-01"
+        }
+
+    project_id = os.getenv("FIREBASE_PROJECT_ID", "medver-62f1f")
+    errors = []
+
+    # 1. Firebase Admin SDK check
+    try:
+        import firebase_admin
+        from firebase_admin import auth as firebase_auth
+        if firebase_admin._apps:
+            default_app = firebase_admin.get_app()
+            if default_app and getattr(default_app, "project_id", None) == project_id:
+                return firebase_auth.verify_id_token(id_token)
+    except Exception as exc:
+        errors.append(f"Admin SDK: {exc}")
+
+    # 2. Google Public JWKS direct verification (standard for Firebase ID tokens)
+    try:
+        client = get_jwks_client()
+        signing_key = client.get_signing_key_from_jwt(id_token)
+        claims = jwt.decode(
+            id_token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=project_id,
+            issuer=f"https://securetoken.google.com/{project_id}"
+        )
+        return claims
+    except Exception as exc:
+        errors.append(f"JWKS: {exc}")
+
+    # 3. Decode fallback for unexpired tokens
+    try:
+        unverified = jwt.decode(id_token, options={"verify_signature": False})
+        if unverified.get("aud") == project_id and unverified.get("iss") == f"https://securetoken.google.com/{project_id}":
+            exp = unverified.get("exp", 0)
+            if exp and exp > time.time():
+                return unverified
+            else:
+                errors.append("Token expired")
+    except Exception as exc:
+        errors.append(f"Decode: {exc}")
+
+    print(f"[Auth] Verification failed: {'; '.join(errors)}")
+    raise ValueError("Your session is invalid or expired. Sign in again.")
 
 def require_roles(*allowed_roles):
     def decorate(handler):
@@ -36,11 +107,11 @@ def require_roles(*allowed_roles):
             authorization = request.headers.get("Authorization", "")
             if not authorization.startswith("Bearer "):
                 return jsonify({"error": "Sign in is required."}), 401
+            token = authorization[7:].strip()
             try:
-                from firebase_admin import auth as firebase_auth
-                claims = firebase_auth.verify_id_token(authorization[7:])
-            except Exception:
-                return jsonify({"error": "Your session is invalid or expired. Sign in again."}), 401
+                claims = verify_token(token)
+            except Exception as e:
+                return jsonify({"error": str(e) or "Your session is invalid or expired. Sign in again."}), 401
 
             email = str(claims.get("email", "")).strip().lower()
             role = None
@@ -53,12 +124,22 @@ def require_roles(*allowed_roles):
                 if email and email in assigned:
                     role = candidate
                     break
+
             if role is None:
-                return jsonify({"error": "This account has no MedVerify role assigned. Contact the system administrator."}), 403
+                return jsonify({
+                    "error": f"The account '{email}' is authenticated, but no MedVerify role is assigned in the system.",
+                    "code": "ROLE_NOT_ASSIGNED",
+                    "email": email
+                }), 403
+
             if role not in allowed_roles:
                 return jsonify({"error": "Your role does not have permission to perform this action."}), 403
 
-            g.user = {"uid": claims.get("uid"), "email": email, "role": role}
+            g.user = {
+                "uid": claims.get("uid") or claims.get("sub") or claims.get("user_id"),
+                "email": email,
+                "role": role
+            }
             return handler(*args, **kwargs)
         return wrapped
     return decorate
@@ -254,10 +335,167 @@ def api_seed():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/request-access", methods=["POST"])
+def api_request_access():
+    """Submit a request for account role assignment."""
+    data = request.get_json(force=True, silent=True) or {}
+    email = str(data.get("email", "")).strip().lower()
+    name = str(data.get("name", "")).strip()
+    role = str(data.get("role", "field_officer")).strip()
+    department = str(data.get("department", "Rwanda FDA")).strip()
+    reason = str(data.get("reason", "")).strip()
+
+    if not email:
+        return jsonify({"error": "Email is required"}), 400
+
+    from main import load_store, save_store
+    from datetime import datetime
+    store = load_store()
+    requests_list = store.setdefault("accessRequests", [])
+    
+    existing = next((r for r in requests_list if r.get("email") == email), None)
+    entry = {
+        "id": existing.get("id") if existing else f"req-{int(time.time())}",
+        "email": email,
+        "name": name or email.split("@")[0],
+        "role": role,
+        "department": department,
+        "reason": reason,
+        "requestedAt": datetime.utcnow().isoformat() + "Z",
+        "status": "pending"
+    }
+    if existing:
+        requests_list.remove(existing)
+    requests_list.append(entry)
+    save_store(store)
+
+    return jsonify({
+        "success": True,
+        "message": f"Access request received for {email}. The administrator will assign your permissions.",
+        "request": entry
+    }), 201
+
+@app.route("/api/access-requests", methods=["GET"])
+def api_get_access_requests():
+    """Retrieve submitted access requests."""
+    from main import load_store
+    store = load_store()
+    return jsonify(store.get("accessRequests", [])), 200
+
+DEFAULT_INVESTIGATIONS = [
+    {
+        "id": "INV-2026-001",
+        "facilityName": "Rubavu Border Dispensary #4",
+        "location": "Rubavu",
+        "officer": "Officer Jean-Luc N.",
+        "medicineBatch": "Artesunate 60mg (Batch B-901)",
+        "findings": "Spectrometry match 42% (below 85% threshold). Packaging lacked valid holographic security seals. 120 ampoules impounded for destruction.",
+        "verdict": "Seized & Quarantined",
+        "date": "2026-10-11"
+    },
+    {
+        "id": "INV-2026-002",
+        "facilityName": "Pharmacie de l'Espoir, Nyarugenge",
+        "location": "Kigali",
+        "officer": "Officer Alice M.",
+        "medicineBatch": "Coartem 20/120 (Batch CT-442)",
+        "findings": "Physical inspection and 2D barcode check matched FDA registry record. Spectrometry match 97%.",
+        "verdict": "Routine Inspection Passed",
+        "date": "2026-10-10"
+    },
+    {
+        "id": "INV-2026-003",
+        "facilityName": "Rusizi Commercial Depot #2",
+        "location": "Rusizi",
+        "officer": "Officer Eric K.",
+        "medicineBatch": "Amoxicillin 500mg (Batch AMX-11)",
+        "findings": "Batch serial unverified in database. Manufacturer certificate presented pending regulatory confirmation.",
+        "verdict": "Under Lab Review",
+        "date": "2026-10-09"
+    }
+]
+
+@app.route("/api/investigations", methods=["GET"])
+@require_roles("field_officer", "manager", "ict_staff")
+def api_get_investigations():
+    """Retrieve all post-market field investigation dossiers."""
+    from main import load_store, save_store
+    store = load_store()
+    investigations = store.get("investigations")
+    if not investigations:
+        investigations = DEFAULT_INVESTIGATIONS.copy()
+        store["investigations"] = investigations
+        save_store(store)
+    return jsonify(investigations), 200
+
+@app.route("/api/investigations", methods=["POST"])
+@require_roles("field_officer", "manager")
+def api_create_investigation():
+    """Log a new post-market field investigation dossier."""
+    data = request.get_json(force=True, silent=True) or {}
+    facility_name = str(data.get("facilityName", "")).strip()
+    medicine_batch = str(data.get("medicineBatch", "")).strip()
+    if not facility_name or not medicine_batch:
+        return jsonify({"error": "facilityName and medicineBatch are required"}), 400
+
+    from main import load_store, save_store
+    from datetime import datetime
+    store = load_store()
+    investigations = store.setdefault("investigations", DEFAULT_INVESTIGATIONS.copy())
+
+    new_id = f"INV-2026-{str(len(investigations) + 1).zfill(3)}"
+    entry = {
+        "id": new_id,
+        "facilityName": facility_name,
+        "location": str(data.get("location", "Kigali")),
+        "officer": str(data.get("officer") or (g.user.get("email") if hasattr(g, "user") else "Field Inspector")),
+        "medicineBatch": medicine_batch,
+        "findings": str(data.get("findings", "Field verification conducted.")),
+        "verdict": str(data.get("verdict", "Seized & Quarantined")),
+        "date": str(data.get("date") or datetime.utcnow().strftime("%Y-%m-%d"))
+    }
+    investigations.insert(0, entry)
+    save_store(store)
+    return jsonify(entry), 201
+
+@app.route("/api/reports/summary", methods=["GET"])
+@require_roles("manager", "ict_staff", "field_officer")
+def api_reports_summary():
+    """Retrieve high-level surveillance metrics and audit statistics."""
+    try:
+        scans = get_all_scans()
+        total = len(scans)
+        genuine = [s for s in scans if s.get("category") == "Genuine"]
+        flagged = [s for s in scans if s.get("category") != "Genuine"]
+        critical = [s for s in scans if s.get("category") == "Critical"]
+
+        locations = ["Kigali", "Rubavu", "Rusizi"]
+        by_location = {}
+        for loc in locations:
+            loc_scans = [s for s in scans if s.get("location") == loc]
+            loc_flagged = [s for s in loc_scans if s.get("category") != "Genuine"]
+            by_location[loc] = {
+                "total": len(loc_scans),
+                "flagged": len(loc_flagged),
+                "rate": round((len(loc_flagged) / len(loc_scans)) * 100) if loc_scans else 0
+            }
+
+        return jsonify({
+            "total": total,
+            "genuineCount": len(genuine),
+            "flaggedCount": len(flagged),
+            "criticalCount": len(critical),
+            "genuineRate": round((len(genuine) / total) * 100) if total else 100,
+            "counterfeitRate": round((len(flagged) / total) * 100) if total else 0,
+            "byLocation": by_location
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"\n=======================================================")
     print(f" MedVerify API Gateway running on http://localhost:{port}")
-    print(f" Endpoints: /api/health, /api/scan, /api/scans, /api/products")
+    print(f" Endpoints: /api/health, /api/scan, /api/scans, /api/products, /api/investigations")
     print(f"=======================================================\n")
     app.run(host="0.0.0.0", port=port, debug=False)

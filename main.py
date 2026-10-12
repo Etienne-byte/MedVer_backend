@@ -39,12 +39,27 @@ if os.path.exists(FIREBASE_CRED):
         import firebase_admin
         from firebase_admin import credentials, firestore
         from firebase_admin import db as admin_db
-        if not firebase_admin._apps:
-            cred = credentials.Certificate(FIREBASE_CRED)
-            firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_URL})
-        fs_client = firestore.client()
-        firebase_db = admin_db
-        print("[Firebase] Admin SDK initialized successfully with serviceAccountKey.")
+
+        key_project_id = None
+        try:
+            with open(FIREBASE_CRED, "r", encoding="utf-8") as f:
+                key_data = json.load(f)
+                key_project_id = key_data.get("project_id")
+        except Exception:
+            pass
+
+        if key_project_id and key_project_id != PROJECT_ID:
+            print(f"[Firebase] Note: '{os.path.basename(FIREBASE_CRED)}' project_id is '{key_project_id}', while configured project is '{PROJECT_ID}'.")
+            print(f"[Firebase] Setting up app for project '{PROJECT_ID}' (JWT tokens will be verified via Google public JWKS).")
+            if not firebase_admin._apps:
+                firebase_admin.initialize_app(options={"projectId": PROJECT_ID, "databaseURL": FIREBASE_URL})
+        else:
+            if not firebase_admin._apps:
+                cred = credentials.Certificate(FIREBASE_CRED)
+                firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_URL})
+            fs_client = firestore.client()
+            firebase_db = admin_db
+            print("[Firebase] Admin SDK initialized successfully with serviceAccountKey.")
     except Exception as e:
         firebase_error = str(e)
         print(f"[Firebase] Admin init note: {e}. Using REST & Local store.")
