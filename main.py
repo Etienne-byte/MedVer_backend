@@ -571,9 +571,9 @@ if __name__ == "__main__":
         from api import app
         port = int(os.environ.get("PORT", 8000))
         print(f"\n============================================================")
-        print(f" 🚀 MedVerify API Gateway & Processing Brain is running!")
-        print(f" 🌐 URL: http://localhost:{port}")
-        print(f" 📷 Webcam scanner is in the Web App at http://localhost:5173")
-        print(f" 📟 Simulated ESP32/LCD is active in this console")
+        print(f" [*] MedVerify API Gateway & Processing Brain is running!")
+        print(f" [*] URL: http://localhost:{port}")
+        print(f" [*] Webcam scanner is in the Web App at http://localhost:5173")
+        print(f" [*] Simulated ESP32/LCD is active in this console")
         print(f"============================================================\n")
         app.run(host="0.0.0.0", port=port, debug=False)
