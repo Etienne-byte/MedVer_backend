@@ -17,12 +17,19 @@ from main import (
 )
 
 app = Flask(__name__)
-# Allowed origins for CORS security (Vercel production and local Vite development)
+
+import re
+
+# Allowed origins for CORS security (Cloudflare Pages, Vercel, and local Vite development)
 DEFAULT_ALLOWED_ORIGINS = [
+    re.compile(r"^https://.*\.pages\.dev$"),
+    "https://medverify.pages.dev",
     "https://medverify-259.pages.dev",
+    "https://med-verify-eta.vercel.app",
     "http://localhost:5173",
     "http://localhost:3000",
     "http://localhost:5174",
+    "http://localhost:4173",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:3000",
 ]
@@ -30,7 +37,7 @@ DEFAULT_ALLOWED_ORIGINS = [
 env_origins = os.getenv("ALLOWED_ORIGINS")
 if env_origins:
     custom_origins = [o.strip().rstrip("/") for o in env_origins.split(",") if o.strip()]
-    allowed_origins = list(dict.fromkeys(DEFAULT_ALLOWED_ORIGINS + custom_origins))
+    allowed_origins = list(DEFAULT_ALLOWED_ORIGINS) + custom_origins
 else:
     allowed_origins = DEFAULT_ALLOWED_ORIGINS
 
@@ -45,6 +52,19 @@ CORS(
     },
     supports_credentials=True
 )
+
+@app.before_request
+def log_request_start():
+    g.start_time = time.time()
+    auth_header = request.headers.get("Authorization", "")
+    has_auth = "Bearer [present]" if auth_header.startswith("Bearer ") else "None"
+    print(f"\n[API Req] >>> {request.method} {request.path} (Origin: {request.headers.get('Origin', 'direct')}, Auth: {has_auth})")
+
+@app.after_request
+def log_request_end(response):
+    duration = (time.time() - getattr(g, "start_time", time.time())) * 1000
+    print(f"[API Res] <<< {request.method} {request.path} -> HTTP {response.status_code} ({duration:.1f}ms)")
+    return response
 
 # Ensure serial (or Mock LCD simulator) is initialized
 connect_serial(SERIAL_PORT, BAUD_RATE)
@@ -62,11 +82,95 @@ def get_jwks_client():
         _jwks_client = PyJWKClient(JWKS_URL, cache_keys=True)
     return _jwks_client
 
+import uuid
+
 ROLE_LABELS = {
     "field_officer": "Post-market surveillance and inspection officer",
     "ict_staff": "ICT and regulatory-systems staff",
     "manager": "Manager, supervisor, or administrator"
 }
+
+def get_store_users():
+    """Retrieve users from database or store, automatically including configured system role accounts."""
+    from main import load_store, firebase_db, firebase_rest_get
+    stored_users = []
+    try:
+        if firebase_db is not None:
+            fb_users = firebase_db.reference("users").get()
+            if isinstance(fb_users, list):
+                stored_users = fb_users
+            elif isinstance(fb_users, dict):
+                stored_users = list(fb_users.values())
+        else:
+            fb_users = firebase_rest_get("users")
+            if isinstance(fb_users, list):
+                stored_users = fb_users
+            elif isinstance(fb_users, dict):
+                stored_users = list(fb_users.values())
+    except Exception:
+        pass
+
+    if not stored_users:
+        store = load_store()
+        stored_users = store.get("users", [])
+
+    existing_emails = {
+        u.get("email", "").strip().lower()
+        for u in stored_users
+        if isinstance(u, dict) and u.get("email")
+    }
+    needs_save = False
+
+    env_roles = [
+        ("manager", os.getenv("ROLE_MANAGER_EMAILS", "manager@example.gov.rw")),
+        ("ict_staff", os.getenv("ROLE_ICT_STAFF_EMAILS", "ict@example.gov.rw")),
+        ("field_officer", os.getenv("ROLE_FIELD_OFFICER_EMAILS", "officer@example.gov.rw"))
+    ]
+
+    for role_name, raw_emails in env_roles:
+        for em in raw_emails.split(","):
+            email_clean = em.strip().lower()
+            if email_clean and email_clean not in existing_emails:
+                prefix = email_clean.split("@")[0].replace(".", " ").title()
+                dept = (
+                    "Rwanda FDA Directorate" if role_name == "manager"
+                    else "Regulatory Informatics & Gateway" if role_name == "ict_staff"
+                    else "Post-Market Surveillance Post"
+                )
+                stored_users.append({
+                    "id": f"usr-{role_name[:3]}-{abs(hash(email_clean)) % 10000:04d}",
+                    "name": prefix,
+                    "email": email_clean,
+                    "role": role_name,
+                    "department": dept,
+                    "status": "active",
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "lastLogin": None
+                })
+                existing_emails.add(email_clean)
+                needs_save = True
+
+    if needs_save:
+        save_store_users(stored_users)
+
+    return stored_users
+
+def save_store_users(users_list):
+    """Persist users to local store and sync to Firebase database."""
+    from main import load_store, save_store, firebase_rest_write, firebase_db
+    store = load_store()
+    store["users"] = users_list
+    save_store(store)
+    try:
+        if firebase_db is not None:
+            firebase_db.reference("users").set(users_list)
+        else:
+            firebase_rest_write("PUT", "users", users_list)
+    except Exception as e:
+        print(f"[Firebase Users Sync] Note: {e}")
+
+
+
 
 def verify_token(id_token: str):
     """
@@ -141,15 +245,30 @@ def require_roles(*allowed_roles):
 
             email = str(claims.get("email", "")).strip().lower()
             role = None
-            for candidate in ROLE_LABELS:
-                assigned = {
-                    value.strip().lower()
-                    for value in os.getenv(f"ROLE_{candidate.upper()}_EMAILS", "").split(",")
-                    if value.strip()
-                }
-                if email and email in assigned:
-                    role = candidate
-                    break
+
+            # 1. Check store-managed users first
+            store_users = get_store_users()
+            matching_user = next((u for u in store_users if u.get("email", "").strip().lower() == email), None)
+            if matching_user:
+                if matching_user.get("status") == "inactive":
+                    return jsonify({
+                        "error": f"The account '{email}' has been deactivated by a MedVerify Manager.",
+                        "code": "ACCOUNT_DEACTIVATED",
+                        "email": email
+                    }), 403
+                role = matching_user.get("role")
+
+            # 2. Fall back to environment variable definitions
+            if not role:
+                for candidate in ROLE_LABELS:
+                    assigned = {
+                        value.strip().lower()
+                        for value in os.getenv(f"ROLE_{candidate.upper()}_EMAILS", "").split(",")
+                        if value.strip()
+                    }
+                    if email and email in assigned:
+                        role = candidate
+                        break
 
             if role is None:
                 return jsonify({
@@ -161,9 +280,11 @@ def require_roles(*allowed_roles):
             if role not in allowed_roles:
                 return jsonify({"error": "Your role does not have permission to perform this action."}), 403
 
+            user_name = matching_user.get("name") if matching_user else email.split("@")[0].title()
             g.user = {
                 "uid": claims.get("uid") or claims.get("sub") or claims.get("user_id"),
                 "email": email,
+                "name": user_name,
                 "role": role
             }
             return handler(*args, **kwargs)
@@ -395,6 +516,15 @@ def api_request_access():
     requests_list.append(entry)
     save_store(store)
 
+    try:
+        from main import firebase_db, firebase_rest_write
+        if firebase_db is not None:
+            firebase_db.reference("accessRequests").set(requests_list)
+        else:
+            firebase_rest_write("PUT", "accessRequests", requests_list)
+    except Exception as e:
+        print(f"[Firebase AccessRequests Sync] Note: {e}")
+
     return jsonify({
         "success": True,
         "message": f"Access request received for {email}. The administrator will assign your permissions.",
@@ -402,11 +532,200 @@ def api_request_access():
     }), 201
 
 @app.route("/api/access-requests", methods=["GET"])
+@require_roles("manager")
 def api_get_access_requests():
-    """Retrieve submitted access requests."""
-    from main import load_store
+    """Retrieve submitted access requests from database (Manager only)."""
+    from main import load_store, firebase_db, firebase_rest_get
+    try:
+        if firebase_db is not None:
+            fb_reqs = firebase_db.reference("accessRequests").get()
+            if isinstance(fb_reqs, list):
+                return jsonify(fb_reqs), 200
+            elif isinstance(fb_reqs, dict):
+                return jsonify(list(fb_reqs.values())), 200
+        else:
+            fb_reqs = firebase_rest_get("accessRequests")
+            if isinstance(fb_reqs, list):
+                return jsonify(fb_reqs), 200
+            elif isinstance(fb_reqs, dict):
+                return jsonify(list(fb_reqs.values())), 200
+    except Exception:
+        pass
     store = load_store()
     return jsonify(store.get("accessRequests", [])), 200
+
+@app.route("/api/access-requests/<req_id>", methods=["PATCH"])
+@require_roles("manager")
+def api_update_access_request(req_id):
+    """Approve or reject a pending access request and assign role (Manager only)."""
+    import datetime
+    data = request.get_json(force=True, silent=True) or {}
+    action = str(data.get("action", "")).strip().lower()
+    assigned_role = str(data.get("role", "")).strip().lower()
+
+    if action not in ("approve", "reject"):
+        return jsonify({"error": "Action must be 'approve' or 'reject'."}), 400
+
+    from main import load_store, save_store
+    store = load_store()
+    reqs = store.setdefault("accessRequests", [])
+    target_req = next((r for r in reqs if r.get("id") == req_id), None)
+    if not target_req:
+        return jsonify({"error": "Access request not found."}), 404
+
+    target_req["status"] = "approved" if action == "approve" else "rejected"
+
+    if action == "approve":
+        role_to_grant = assigned_role if assigned_role in ROLE_LABELS else target_req.get("role", "field_officer")
+        users = get_store_users()
+        existing_user = next((u for u in users if u.get("email", "").strip().lower() == target_req.get("email", "").strip().lower()), None)
+        if existing_user:
+            existing_user["role"] = role_to_grant
+            existing_user["status"] = "active"
+            if target_req.get("department"):
+                existing_user["department"] = target_req.get("department")
+        else:
+            users.insert(0, {
+                "id": f"usr-{int(time.time())}-{str(uuid.uuid4())[:4]}",
+                "name": target_req.get("name") or target_req.get("email", "").split("@")[0].title(),
+                "email": target_req.get("email"),
+                "role": role_to_grant,
+                "department": target_req.get("department", "Rwanda FDA Central Surveillance"),
+                "status": "active",
+                "createdAt": datetime.datetime.utcnow().isoformat() + "Z",
+                "lastLogin": None
+            })
+        save_store_users(users)
+
+    save_store(store)
+    try:
+        from main import firebase_db, firebase_rest_write
+        if firebase_db is not None:
+            firebase_db.reference("accessRequests").set(reqs)
+        else:
+            firebase_rest_write("PUT", "accessRequests", reqs)
+    except Exception as e:
+        print(f"[Firebase AccessRequests Sync] Note: {e}")
+
+    return jsonify({"success": True, "request": target_req}), 200
+
+@app.route("/api/users", methods=["GET"])
+@require_roles("manager")
+def api_get_users():
+    """Retrieve all system users with their assigned roles and permissions from database (Manager only)."""
+    users = get_store_users()
+    return jsonify(users), 200
+
+@app.route("/api/users", methods=["POST"])
+@require_roles("manager")
+def api_add_user():
+    """Add a new user and assign system permissions across the three roles (Manager only)."""
+    import datetime
+    data = request.get_json(force=True, silent=True) or {}
+    email = str(data.get("email", "")).strip().lower()
+    name = str(data.get("name", "")).strip()
+    role = str(data.get("role", "")).strip().lower()
+    department = str(data.get("department", "Rwanda FDA Central Surveillance")).strip()
+    status = str(data.get("status", "active")).strip().lower()
+    password = str(data.get("password", "")).strip()
+
+    if not email:
+        return jsonify({"error": "Email address is required."}), 400
+    if not name:
+        return jsonify({"error": "Full name is required."}), 400
+    if role not in ROLE_LABELS:
+        return jsonify({"error": f"Invalid role. Must be one of: {', '.join(ROLE_LABELS.keys())}"}), 400
+
+    users = get_store_users()
+
+    if any(u.get("email", "").strip().lower() == email for u in users):
+        return jsonify({"error": f"A user with email '{email}' already exists in the system."}), 409
+
+    # Try creating user in Firebase Auth if Admin SDK has credentials
+    try:
+        import firebase_admin
+        from firebase_admin import auth as fb_auth
+        if firebase_admin._apps and password:
+            fb_auth.create_user(
+                email=email,
+                password=password,
+                display_name=name
+            )
+            print(f"[Auth] Created Firebase Auth account for {email}")
+    except Exception as exc:
+        print(f"[Auth] Firebase Admin user notice: {exc}")
+
+    new_user = {
+        "id": f"usr-{int(time.time())}-{str(uuid.uuid4())[:4]}",
+        "name": name,
+        "email": email,
+        "role": role,
+        "department": department,
+        "status": status if status in ("active", "inactive") else "active",
+        "createdAt": datetime.datetime.utcnow().isoformat() + "Z",
+        "lastLogin": None
+    }
+    users.insert(0, new_user)
+    save_store_users(users)
+    return jsonify(new_user), 201
+
+@app.route("/api/users/<user_id>", methods=["PATCH"])
+@require_roles("manager")
+def api_update_user(user_id):
+    """Update role, status, name, or department for a user (Manager only)."""
+    data = request.get_json(force=True, silent=True) or {}
+    users = get_store_users()
+
+    target = next((u for u in users if u.get("id") == user_id or u.get("email", "").strip().lower() == user_id.lower()), None)
+    if not target:
+        return jsonify({"error": "User not found."}), 404
+
+    # Prevent a manager from disabling their own account or changing their own role to non-manager
+    current_email = g.user.get("email", "").strip().lower()
+    if target.get("email", "").strip().lower() == current_email:
+        if data.get("status") == "inactive":
+            return jsonify({"error": "You cannot deactivate your own administrative account."}), 400
+        if "role" in data and data["role"] != "manager":
+            return jsonify({"error": "You cannot revoke your own manager role."}), 400
+
+    if "role" in data:
+        new_role = str(data["role"]).strip().lower()
+        if new_role not in ROLE_LABELS:
+            return jsonify({"error": f"Invalid role. Must be one of: {', '.join(ROLE_LABELS.keys())}"}), 400
+        target["role"] = new_role
+
+    if "status" in data:
+        new_status = str(data["status"]).strip().lower()
+        if new_status in ("active", "inactive"):
+            target["status"] = new_status
+
+    if "name" in data and str(data["name"]).strip():
+        target["name"] = str(data["name"]).strip()
+
+    if "department" in data:
+        target["department"] = str(data["department"]).strip()
+
+    save_store_users(users)
+    return jsonify(target), 200
+
+@app.route("/api/users/<user_id>", methods=["DELETE"])
+@require_roles("manager")
+def api_delete_user(user_id):
+    """Delete a user from the system (Manager only)."""
+    users = get_store_users()
+
+    target = next((u for u in users if u.get("id") == user_id or u.get("email", "").strip().lower() == user_id.lower()), None)
+    if not target:
+        return jsonify({"error": "User not found."}), 404
+
+    current_email = g.user.get("email", "").strip().lower()
+    if target.get("email", "").strip().lower() == current_email:
+        return jsonify({"error": "You cannot delete your own administrative account."}), 400
+
+    users.remove(target)
+    save_store_users(users)
+    return jsonify({"success": True, "message": f"User {target.get('email')} removed."}), 200
+
 
 DEFAULT_INVESTIGATIONS = [
     {
