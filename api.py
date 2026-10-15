@@ -85,6 +85,7 @@ def get_jwks_client():
 import uuid
 
 ROLE_LABELS = {
+    "admin": "System administrator",
     "field_officer": "Post-market surveillance and inspection officer",
     "ict_staff": "ICT and regulatory-systems staff",
     "manager": "Manager, supervisor, or administrator"
@@ -122,6 +123,7 @@ def get_store_users():
     needs_save = False
 
     env_roles = [
+        ("admin", os.getenv("ROLE_ADMIN_EMAILS", "admin@example.gov.rw,admin@medver.rw")),
         ("manager", os.getenv("ROLE_MANAGER_EMAILS", "manager@example.gov.rw")),
         ("ict_staff", os.getenv("ROLE_ICT_STAFF_EMAILS", "ict@example.gov.rw")),
         ("field_officer", os.getenv("ROLE_FIELD_OFFICER_EMAILS", "officer@example.gov.rw"))
@@ -133,7 +135,8 @@ def get_store_users():
             if email_clean and email_clean not in existing_emails:
                 prefix = email_clean.split("@")[0].replace(".", " ").title()
                 dept = (
-                    "Rwanda FDA Directorate" if role_name == "manager"
+                    "Rwanda FDA Executive System Administration" if role_name == "admin"
+                    else "Rwanda FDA Directorate" if role_name == "manager"
                     else "Regulatory Informatics & Gateway" if role_name == "ict_staff"
                     else "Post-Market Surveillance Post"
                 )
@@ -277,7 +280,7 @@ def require_roles(*allowed_roles):
                     "email": email
                 }), 403
 
-            if role not in allowed_roles:
+            if role != "admin" and role not in allowed_roles:
                 return jsonify({"error": "Your role does not have permission to perform this action."}), 403
 
             user_name = matching_user.get("name") if matching_user else email.split("@")[0].title()
@@ -426,8 +429,8 @@ def api_update_scan(scan_id):
             return jsonify({"error": "caseStatus is invalid"}), 400
         changes["caseStatus"] = case_status
     if priority is not None:
-        if g.user["role"] != "manager":
-            return jsonify({"error": "Only managers can set case priority."}), 403
+        if g.user["role"] not in {"manager", "admin"}:
+            return jsonify({"error": "Only managers and administrators can set case priority."}), 403
         if priority not in {"low", "normal", "high", "urgent"}:
             return jsonify({"error": "priority must be low, normal, high, or urgent"}), 400
         changes["priority"] = priority
@@ -680,13 +683,13 @@ def api_update_user(user_id):
     if not target:
         return jsonify({"error": "User not found."}), 404
 
-    # Prevent a manager from disabling their own account or changing their own role to non-manager
+    # Prevent an administrator or manager from disabling their own account or changing their own role to non-admin/manager
     current_email = g.user.get("email", "").strip().lower()
     if target.get("email", "").strip().lower() == current_email:
         if data.get("status") == "inactive":
             return jsonify({"error": "You cannot deactivate your own administrative account."}), 400
-        if "role" in data and data["role"] != "manager":
-            return jsonify({"error": "You cannot revoke your own manager role."}), 400
+        if "role" in data and data["role"] not in {"manager", "admin"}:
+            return jsonify({"error": "You cannot revoke your own administrative role."}), 400
 
     if "role" in data:
         new_role = str(data["role"]).strip().lower()
