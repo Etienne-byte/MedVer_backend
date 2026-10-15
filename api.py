@@ -91,6 +91,78 @@ ROLE_LABELS = {
     "manager": "Manager, supervisor, or administrator"
 }
 
+class FirebaseAuthCreateError(Exception):
+    def __init__(self, message, status_code=502):
+        super().__init__(message)
+        self.status_code = status_code
+
+def create_firebase_auth_user(email, password, name):
+    """Create a Firebase email/password account, falling back to the Web Auth API."""
+    try:
+        import firebase_admin
+        from firebase_admin import auth as fb_auth
+
+        if firebase_admin._apps:
+            app = firebase_admin.get_app()
+            expected_project = os.getenv("FIREBASE_PROJECT_ID", "")
+            if not expected_project or app.project_id == expected_project:
+                try:
+                    user = fb_auth.create_user(email=email, password=password, display_name=name, app=app)
+                    return user.uid
+                except fb_auth.EmailAlreadyExistsError:
+                    raise FirebaseAuthCreateError(
+                        "This email already has a Firebase Authentication account. Use its existing credentials or assign its role.",
+                        409
+                    )
+                except Exception as exc:
+                    # A project-mismatched or credential-less Admin SDK cannot create accounts.
+                    print(f"[Auth] Admin SDK account creation unavailable ({type(exc).__name__}); trying Firebase Auth REST API.")
+    except FirebaseAuthCreateError:
+        raise
+    except Exception as exc:
+        print(f"[Auth] Admin SDK account creation unavailable ({type(exc).__name__}); trying Firebase Auth REST API.")
+
+    api_key = os.getenv("FIREBASE_WEB_API_KEY") or os.getenv("VITE_FIREBASE_API_KEY")
+    if not api_key:
+        raise FirebaseAuthCreateError(
+            "Firebase account creation is not configured. Set FIREBASE_WEB_API_KEY in the backend .env file."
+        )
+
+    import requests
+    try:
+        response = requests.post(
+            f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={api_key}",
+            json={"email": email, "password": password, "returnSecureToken": True},
+            timeout=15
+        )
+    except requests.RequestException as exc:
+        print(f"[Auth] Firebase Auth REST request failed ({type(exc).__name__}).")
+        raise FirebaseAuthCreateError("Firebase Authentication could not be reached. The user was not created.")
+
+    try:
+        result = response.json()
+    except ValueError:
+        result = {}
+
+    if response.ok and result.get("localId"):
+        return result["localId"]
+
+    error_message = str((result.get("error") or {}).get("message", ""))
+    if error_message.startswith("EMAIL_EXISTS"):
+        raise FirebaseAuthCreateError(
+            "This email already has a Firebase Authentication account. Use its existing credentials or assign its role.",
+            409
+        )
+    if error_message.startswith("WEAK_PASSWORD"):
+        raise FirebaseAuthCreateError(error_message.replace("WEAK_PASSWORD : ", ""), 400)
+    if error_message.startswith("OPERATION_NOT_ALLOWED"):
+        raise FirebaseAuthCreateError("Enable Email/Password sign-in in the Firebase Console, then try again.", 400)
+    if error_message.startswith("API_KEY_INVALID") or error_message.startswith("PROJECT_NOT_FOUND"):
+        raise FirebaseAuthCreateError("The backend Firebase Web API key does not match the configured Firebase project.", 500)
+    if not response.ok:
+        print(f"[Auth] Firebase Auth rejected account creation: {error_message or response.status_code}.")
+    raise FirebaseAuthCreateError("Firebase Authentication could not create this account. Check the Firebase project configuration.")
+
 def get_store_users():
     """Retrieve users from database or store, automatically including configured system role accounts."""
     from main import load_store, firebase_db, firebase_rest_get
@@ -630,7 +702,7 @@ def api_add_user():
     role = str(data.get("role", "")).strip().lower()
     department = str(data.get("department", "Rwanda FDA Central Surveillance")).strip()
     status = str(data.get("status", "active")).strip().lower()
-    password = str(data.get("password", "")).strip()
+    password = data.get("password")
 
     if not email:
         return jsonify({"error": "Email address is required."}), 400
@@ -638,37 +710,35 @@ def api_add_user():
         return jsonify({"error": "Full name is required."}), 400
     if role not in ROLE_LABELS:
         return jsonify({"error": f"Invalid role. Must be one of: {', '.join(ROLE_LABELS.keys())}"}), 400
+    if not isinstance(password, str) or not password:
+        return jsonify({"error": "An initial password is required to create a sign-in account."}), 400
 
     users = get_store_users()
+    existing_user = next((u for u in users if u.get("email", "").strip().lower() == email), None)
 
-    if any(u.get("email", "").strip().lower() == email for u in users):
-        return jsonify({"error": f"A user with email '{email}' already exists in the system."}), 409
-
-    # Try creating user in Firebase Auth if Admin SDK has credentials
+    # Create the Firebase Auth account before saving the MedVerify role. Never report
+    # success or persist a role record if the email/password account was not created.
     try:
-        import firebase_admin
-        from firebase_admin import auth as fb_auth
-        if firebase_admin._apps and password:
-            fb_auth.create_user(
-                email=email,
-                password=password,
-                display_name=name
-            )
-            print(f"[Auth] Created Firebase Auth account for {email}")
-    except Exception as exc:
-        print(f"[Auth] Firebase Admin user notice: {exc}")
+        auth_uid = create_firebase_auth_user(email, password, name)
+    except FirebaseAuthCreateError as exc:
+        return jsonify({"error": str(exc)}), exc.status_code
 
     new_user = {
-        "id": f"usr-{int(time.time())}-{str(uuid.uuid4())[:4]}",
+        "id": existing_user.get("id") if existing_user else f"usr-{int(time.time())}-{str(uuid.uuid4())[:4]}",
         "name": name,
         "email": email,
         "role": role,
         "department": department,
         "status": status if status in ("active", "inactive") else "active",
+        "authUid": auth_uid,
         "createdAt": datetime.datetime.utcnow().isoformat() + "Z",
         "lastLogin": None
     }
-    users.insert(0, new_user)
+    if existing_user:
+        existing_user.update(new_user)
+        new_user = existing_user
+    else:
+        users.insert(0, new_user)
     save_store_users(users)
     return jsonify(new_user), 201
 
