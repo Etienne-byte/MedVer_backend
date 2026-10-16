@@ -99,19 +99,20 @@ DEFAULT_ROLE_EMAILS = {
 }
 
 def configured_role_emails(role):
-    """Return the role allowlist, including bootstrap defaults when no admin list is set."""
+    """Return the configured role list while preserving built-in admin access."""
     raw_emails = os.getenv(f"ROLE_{role.upper()}_EMAILS")
     if raw_emails is None:
         raw_emails = ",".join(DEFAULT_ROLE_EMAILS.get(role, ()))
 
+    configured_emails = raw_emails.split(",") if raw_emails else []
+    if role == "admin":
+        configured_emails = list(DEFAULT_ROLE_EMAILS["admin"]) + configured_emails
+
     emails = list(dict.fromkeys(
         email.strip().lower()
-        for email in raw_emails.split(",")
+        for email in configured_emails
         if email.strip()
     ))
-    # Keep the built-in bootstrap admin available when the host has an empty env value.
-    if role == "admin" and not emails:
-        emails = list(DEFAULT_ROLE_EMAILS["admin"])
     return emails
 
 class FirebaseAuthCreateError(Exception):
