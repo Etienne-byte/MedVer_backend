@@ -91,6 +91,29 @@ ROLE_LABELS = {
     "manager": "Manager, supervisor, or administrator"
 }
 
+DEFAULT_ROLE_EMAILS = {
+    "admin": ("admin@example.gov.rw", "admin@medver.rw"),
+    "manager": ("manager@example.gov.rw",),
+    "ict_staff": ("ict@example.gov.rw",),
+    "field_officer": ("officer@example.gov.rw",)
+}
+
+def configured_role_emails(role):
+    """Return the role allowlist, including bootstrap defaults when no admin list is set."""
+    raw_emails = os.getenv(f"ROLE_{role.upper()}_EMAILS")
+    if raw_emails is None:
+        raw_emails = ",".join(DEFAULT_ROLE_EMAILS.get(role, ()))
+
+    emails = list(dict.fromkeys(
+        email.strip().lower()
+        for email in raw_emails.split(",")
+        if email.strip()
+    ))
+    # Keep the built-in bootstrap admin available when the host has an empty env value.
+    if role == "admin" and not emails:
+        emails = list(DEFAULT_ROLE_EMAILS["admin"])
+    return emails
+
 class FirebaseAuthCreateError(Exception):
     def __init__(self, message, status_code=502):
         super().__init__(message)
@@ -194,17 +217,23 @@ def get_store_users():
     }
     needs_save = False
 
-    env_roles = [
-        ("admin", os.getenv("ROLE_ADMIN_EMAILS", "admin@example.gov.rw,admin@medver.rw")),
-        ("manager", os.getenv("ROLE_MANAGER_EMAILS", "manager@example.gov.rw")),
-        ("ict_staff", os.getenv("ROLE_ICT_STAFF_EMAILS", "ict@example.gov.rw")),
-        ("field_officer", os.getenv("ROLE_FIELD_OFFICER_EMAILS", "officer@example.gov.rw"))
-    ]
+    env_roles = ("admin", "manager", "ict_staff", "field_officer")
+    users_by_email = {
+        user.get("email", "").strip().lower(): user
+        for user in stored_users
+        if isinstance(user, dict) and user.get("email")
+    }
 
-    for role_name, raw_emails in env_roles:
-        for em in raw_emails.split(","):
-            email_clean = em.strip().lower()
-            if email_clean and email_clean not in existing_emails:
+    for role_name in env_roles:
+        for email_clean in configured_role_emails(role_name):
+            existing_user = users_by_email.get(email_clean)
+            if existing_user:
+                if not str(existing_user.get("role", "")).strip():
+                    existing_user["role"] = role_name
+                    needs_save = True
+                continue
+
+            if email_clean not in existing_emails:
                 prefix = email_clean.split("@")[0].replace(".", " ").title()
                 dept = (
                     "Rwanda FDA Executive System Administration" if role_name == "admin"
@@ -223,6 +252,7 @@ def get_store_users():
                     "lastLogin": None
                 })
                 existing_emails.add(email_clean)
+                users_by_email[email_clean] = stored_users[-1]
                 needs_save = True
 
     if needs_save:
@@ -336,12 +366,7 @@ def require_roles(*allowed_roles):
             # 2. Fall back to environment variable definitions
             if not role:
                 for candidate in ROLE_LABELS:
-                    assigned = {
-                        value.strip().lower()
-                        for value in os.getenv(f"ROLE_{candidate.upper()}_EMAILS", "").split(",")
-                        if value.strip()
-                    }
-                    if email and email in assigned:
+                    if email and email in configured_role_emails(candidate):
                         role = candidate
                         break
 
