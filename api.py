@@ -571,7 +571,10 @@ def api_add_product():
 @require_roles("ict_staff", "admin")
 def api_toggle_product(product_id):
     """Toggle product status between valid and flagged."""
-    res = toggle_product_status(product_id)
+    try:
+        res = toggle_product_status(product_id)
+    except Exception as e:
+        return jsonify({"error": f"Could not save product status: {e}"}), 502
     if not res:
         return jsonify({"error": "Product not found"}), 404
     return jsonify(res), 200

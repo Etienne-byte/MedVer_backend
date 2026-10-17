@@ -165,6 +165,10 @@ class MockSerialLCD:
             print(f"| {line3} |")
             print(f"| {line4} |")
             print("+-----------------------------------+\n")
+        elif text.startswith("RESULT|"):
+            result = text.partition("|")[2].strip().upper()
+            led = "GREEN" if result == "GENUINE" else "RED"
+            print(f"[SIMULATED LEDs] {led} for 1 second ({result or 'UNKNOWN RESULT'})")
 
     def close(self):
         self.is_open = False
@@ -227,6 +231,21 @@ def send_to_esp32(barcode_value, barcode_type="EAN13"):
     except Exception as e:
         print(f"[Serial] Write error: {e}")
 
+def send_scan_result(category):
+    """Send the database-backed scan classification to the status LEDs."""
+    global _global_serial
+    ser = _global_serial or connect_serial(SERIAL_PORT, BAUD_RATE)
+    if ser is None or not getattr(ser, "is_open", False):
+        return
+
+    result = "GENUINE" if str(category).strip().casefold() == "genuine" else "NOT_GENUINE"
+    line = f"RESULT|{result}\n"
+    try:
+        ser.write(line.encode("utf-8"))
+        print(f"[Serial] Sent scan result to Arduino LEDs: {result}")
+    except Exception as e:
+        print(f"[Serial] Result write error: {e}")
+
 # ================== CLASSIFY (mirrors frontend classify.ts) =================
 def level(s: int) -> str:
     return "high" if s >= 85 else "moderate" if s >= 60 else "low"
@@ -275,7 +294,7 @@ def lookup_product(barcode: str):
 
 def submit_scan(barcode: str, similarity: int = DEFAULT_SIMILARITY,
                 location: str = DEFAULT_LOCATION, device: str = DEVICE_ID) -> dict:
-    """Classify medicine, write scan record, update LCD and store."""
+    """Classify medicine, write scan record, and update the LCD/status LEDs."""
     p = lookup_product(barcode)
     if p is None:
         code_match, product_name = "not_found", "Unknown product"
@@ -342,6 +361,7 @@ def submit_scan(barcode: str, similarity: int = DEFAULT_SIMILARITY,
 
     # 4. Transmit to Arduino / Simulated LCD
     send_to_esp32(barcode, "EAN13")
+    send_scan_result(category)
 
     print(f"[Scan Saved] {barcode} -> {product_name} -> {category}")
     return record
@@ -406,28 +426,40 @@ def add_product(prod_data: dict):
 
 def toggle_product_status(pid: str):
     p = None
+    remote_read_succeeded = False
     if firebase_db is not None:
         try:
             p = firebase_db.reference(f"products/{pid}").get()
+            remote_read_succeeded = True
         except Exception as exc:
             print(f"[Firebase] Product status read failed: {exc}")
+    else:
+        try:
+            p = firebase_rest_get(f"products/{pid}")
+            remote_read_succeeded = True
+        except requests.RequestException as exc:
+            print(f"[Firebase] Product status REST read failed; using local cache: {exc}")
     p = p or _db_store["products"].get(pid)
     if not p:
         return None
-    p["status"] = "flagged" if p.get("status") == "valid" else "valid"
-    _db_store["products"][pid] = p
-    save_store(_db_store)
+
+    updated = {**p, "status": "flagged" if p.get("status") == "valid" else "valid"}
     if firebase_db is not None:
         try:
-            firebase_db.reference(f"products/{pid}").set(p)
+            firebase_db.reference(f"products/{pid}").set(updated)
         except Exception as exc:
-            print(f"[Firebase] Product status write failed: {exc}")
-    else:
+            raise RuntimeError(f"Firebase rejected the product status update: {exc}") from exc
+    elif remote_read_succeeded:
         try:
-            firebase_rest_write("PUT", f"products/{pid}", p)
+            firebase_rest_write("PUT", f"products/{pid}", updated)
         except requests.RequestException as exc:
-            print(f"[Firebase] Product status REST write failed: {exc}")
-    return {"id": pid, **p}
+            raise RuntimeError(f"Firebase rejected the product status update: {exc}") from exc
+
+    # Keep the local cache in sync only after the remote write succeeds, or when
+    # Firebase could not be reached and this process is operating from its cache.
+    _db_store["products"][pid] = updated
+    save_store(_db_store)
+    return {"id": pid, **updated}
 
 def update_scan_status(scan_id: str, changes):
     record = None
